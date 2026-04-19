@@ -1,0 +1,81 @@
+import os
+import time
+from pathlib import Path
+from dotenv import load_dotenv
+from tqdm.auto import tqdm
+from pinecone import Pinecone,ServerlessSpec
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+load_dotenv()
+
+GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY")
+PINECONE_API_KEY=os.getenv("PINECONE_API_KEY")
+PINECONE_ENV="us-east-1"
+PINECONE_INDEX_NAME="medicalindex"
+
+os.environ["GOOGLE_API_KEY"]=GOOGLE_API_KEY
+
+UPLOAD_DIR="./uploaded_docs"
+os.makedirs(UPLOAD_DIR,exist_ok=True)
+
+# Intialize Pinecone instance
+pc=Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+spec=ServerlessSpec(cloud="aws",region=PINECONE_ENV)
+existing_indexes=[i["name"] for i in pc.list_indexes()]
+
+if PINECONE_INDEX_NAME not in existing_indexes:
+    pc.create_index(
+        name=PINECONE_INDEX_NAME,
+        dimension=384,
+        metric="dotproduct",
+        spec=spec
+    )
+
+
+    while not pc.describe_index(PINECONE_INDEX_NAME).status["ready"]:
+        time.sleep(1)
+
+index=pc.Index(PINECONE_INDEX_NAME)
+
+#load,split,embed and upsertpdf doc content
+
+def load_vectorestore(uploaded_files):
+    embed_model=embed_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+    file_paths=[]
+
+    #upload 
+    for file in uploaded_files:
+        save_path=Path(UPLOAD_DIR)/file.filename
+        with open(save_path,'wb') as f:
+            f.write(file.file.read())
+        file_paths.append(str(save_path))
+    #2. Split
+    for file_path in file_paths:
+        loader=PyPDFLoader(file_path)
+        documents=loader.load()
+
+        splitter=RecursiveCharacterTextSplitter(chunk_size=500,chunk_overlap=100)
+        chunks=splitter.split_documents(documents)
+
+        texts=[chunk.page_content for chunk in chunks]
+        metadata=[chunk.metadata for chunk in chunks]
+        ids = [f"{Path(file_path).stem}-{i}" for i in range(len(chunks))]
+
+        #3. Embeddings
+        print(f"Embedding Chunks ")
+        embedding=embed_model.embed_documents(texts)
+
+        # 4. Upsert
+        print("Upserting embeddings...")
+        with tqdm(total=len(embedding),desc="Upserting to Pinecone") as progress:
+            index.upsert(vectors=zip(ids,embedding,metadata))
+            progress.update(len(embedding))
+        print(f"Upload complete for {file_path}")
+
+
+
+
