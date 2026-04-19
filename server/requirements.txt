@@ -18,3 +18,4 @@ pydantic
 requests
 tqdm
 loguru
+sentence-transformers
